@@ -1,10 +1,10 @@
-from flask import Flask, render_template, request, jsonify, send_file, send_from_directory
+from flask import Flask, jsonify, render_template, request, send_from_directory
 import os
-import tempfile
 from markitdown import MarkItDown
 from werkzeug.utils import secure_filename
 import uuid
 from datetime import datetime
+from werkzeug.exceptions import NotFound, RequestEntityTooLarge
 
 # Check if running on Vercel
 is_vercel = os.environ.get('VERCEL') == '1'
@@ -15,11 +15,9 @@ app = Flask(__name__,
 
 app.config['MAX_CONTENT_LENGTH'] = 50 * 1024 * 1024  # 50MB max file size
 
-# For Vercel, use /tmp directory; for local, use uploads
-if is_vercel:
-    app.config['UPLOAD_FOLDER'] = '/tmp/uploads'
-else:
-    app.config['UPLOAD_FOLDER'] = 'uploads'
+app.config['UPLOAD_FOLDER'] = os.environ.get(
+    'UPLOAD_FOLDER', '/tmp/uploads' if is_vercel else 'uploads'
+)
 
 # Ensure upload folder exists
 os.makedirs(app.config['UPLOAD_FOLDER'], exist_ok=True)
@@ -29,6 +27,17 @@ ALLOWED_EXTENSIONS = {
     'pdf', 'docx', 'doc', 'pptx', 'ppt', 'xlsx', 'xls',
     'html', 'htm', 'csv', 'json', 'xml', 'txt', 'md'
 }
+
+
+@app.errorhandler(RequestEntityTooLarge)
+def handle_file_too_large(_error):
+    return jsonify({'error': 'File exceeds the 50MB size limit'}), 413
+
+
+@app.route('/healthz')
+def health_check():
+    return jsonify({'status': 'ok'})
+
 
 def allowed_file(filename):
     return '.' in filename and filename.rsplit('.', 1)[1].lower() in ALLOWED_EXTENSIONS
@@ -60,6 +69,7 @@ def index():
 
 @app.route('/convert', methods=['POST'])
 def convert_file():
+    file_path = None
     try:
         if 'file' not in request.files:
             return jsonify({'error': 'No file provided'}), 400
@@ -68,85 +78,66 @@ def convert_file():
         if file.filename == '':
             return jsonify({'error': 'No file selected'}), 400
         
-        print(f"Received file: {file.filename}")
-        
-        if not allowed_file(file.filename):
+        filename = secure_filename(file.filename)
+        if not filename:
+            return jsonify({'error': 'Invalid file name'}), 400
+
+        if not allowed_file(filename):
             return jsonify({'error': 'File type not supported'}), 400
         
         # Generate unique filename
-        filename = secure_filename(file.filename)
         unique_filename = f"{uuid.uuid4()}_{filename}"
         file_path = os.path.join(app.config['UPLOAD_FOLDER'], unique_filename)
         file.save(file_path)
-        
-        print(f"File saved to: {file_path}")
-        
-        # Initialize MarkItDown
-        try:
-            # Force import of PDF dependencies
-            import pdfminer
-            md = MarkItDown(enable_plugins=False)
-            print(f"MarkItDown initialized successfully")
-            
-            # Check available converters
-            converters = [type(c).__name__ for c in md._converters]
-            print(f"Available converters: {converters}")
-            
-        except Exception as e:
-            print(f"Failed to initialize MarkItDown: {e}")
-            raise
-        
-        # Convert file
-        try:
-            print(f"Converting file: {file_path}")
-            result = md.convert(file_path)
-            print(f"Conversion successful")
-        except Exception as e:
-            print(f"Conversion failed: {e}")
-            import traceback
-            traceback.print_exc()
-            raise
-        
+        if os.path.getsize(file_path) == 0:
+            return jsonify({'error': 'File is empty'}), 400
+
+        md = MarkItDown(enable_plugins=False)
+        result = md.convert(file_path)
+
         # Generate output filename
         base_name = os.path.splitext(filename)[0]
-        output_filename = f"{base_name}_converted.md"
+        output_filename = f"{base_name}_converted_{uuid.uuid4().hex[:8]}.md"
         output_path = os.path.join(app.config['UPLOAD_FOLDER'], output_filename)
         
         # Save converted content
         with open(output_path, 'w', encoding='utf-8') as f:
             f.write(result.text_content)
         
-        # Clean up input file
-        os.remove(file_path)
-        
         return jsonify({
             'success': True,
             'output_filename': output_filename,
             'download_url': f'/download/{output_filename}',
             'content_preview': result.text_content[:500] + '...' if len(result.text_content) > 500 else result.text_content,
-            'file_type': get_file_type(unique_filename)
+            'file_type': get_file_type(filename)
         })
         
-    except Exception as e:
-        # Clean up on error
-        if 'file_path' in locals() and os.path.exists(file_path):
-            os.remove(file_path)
-        error_msg = f'Conversion failed: {str(e)}'
-        print(error_msg)
-        import traceback
-        traceback.print_exc()
-        return jsonify({'error': error_msg}), 500
+    except RequestEntityTooLarge:
+        return jsonify({'error': 'File exceeds the 50MB size limit'}), 413
+    except Exception:
+        app.logger.exception('File conversion failed')
+        return jsonify({'error': 'Conversion failed'}), 500
+    finally:
+        if file_path and os.path.exists(file_path):
+            try:
+                os.remove(file_path)
+            except OSError:
+                app.logger.exception('Failed to remove uploaded file')
 
 @app.route('/download/<filename>')
 def download_file(filename):
     try:
-        return send_file(
-            os.path.join(app.config['UPLOAD_FOLDER'], filename),
+        return send_from_directory(
+            app.config['UPLOAD_FOLDER'],
+            filename,
             as_attachment=True,
             download_name=filename
         )
-    except Exception as e:
+    except NotFound:
         return jsonify({'error': 'File not found'}), 404
+    except OSError:
+        app.logger.exception('Failed to download converted file')
+        return jsonify({'error': 'Download failed'}), 500
 
 @app.route('/cleanup', methods=['POST'])
 def cleanup_files():
@@ -157,11 +148,12 @@ def cleanup_files():
             file_path = os.path.join(app.config['UPLOAD_FOLDER'], filename)
             if os.path.isfile(file_path):
                 file_time = datetime.fromtimestamp(os.path.getmtime(file_path))
-                if (current_time - file_time).seconds > 3600:  # 1 hour
+                if (current_time - file_time).total_seconds() > 3600:
                     os.remove(file_path)
         return jsonify({'success': True})
-    except Exception as e:
-        return jsonify({'error': f'Cleanup failed: {str(e)}'}), 500
+    except Exception:
+        app.logger.exception('File cleanup failed')
+        return jsonify({'error': 'Cleanup failed'}), 500
 
 if __name__ == '__main__':
     app.run(debug=True, host='0.0.0.0', port=5001)

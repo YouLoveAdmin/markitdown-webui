@@ -55,6 +55,44 @@ A modern web interface for Microsoft's MarkItDown document conversion tool.
 
 4. Open your browser and navigate to `http://localhost:5001`
 
+## Docker
+
+Build and run the production image locally:
+
+```bash
+docker compose up --build
+```
+
+Open `http://localhost:5001`. Uploaded files are temporary and stored under
+`/tmp/uploads` in the container; they are not persisted across container
+replacements.
+
+## GitHub Container Registry and Azure Container Apps
+
+Merges to `master` build and publish `ghcr.io/youloveadmin/markitdown-webui`
+with a full commit-SHA tag (for example, `ghcr.io/youloveadmin/markitdown-webui:sha-<commit>`).
+The workflow also updates the `latest` tag on the default branch. The GHCR
+package may need its visibility set to public for unauthenticated Azure pulls;
+for a private package, configure registry credentials on the Container App
+using GitHub/Azure secrets rather than committing credentials.
+
+Publishing does not change a running Container App. After the image is
+published and a Container App already exists, deploy a selected commit and
+roll back by selecting another SHA tag:
+
+```bash
+az containerapp update \
+  --name <container-app-name> \
+  --resource-group <resource-group> \
+  --image ghcr.io/youloveadmin/markitdown-webui:sha-<commit>
+```
+
+The Container App must allow ingress to port `5001`. The image exposes a
+`/healthz` endpoint for health checks. Resource creation and registry
+authentication are intentionally environment-specific; provision the
+Container Apps environment and configure access to GHCR before running the
+update command.
+
 > ### ⚠️ macOS: `zsh: command not found: pip` (and why `python app.py` fails too)
 >
 > On a modern Mac the bare `pip` and `python` commands **do not exist** — Apple
@@ -140,9 +178,14 @@ Details and internals are documented in [`CONTROL.md`](CONTROL.md).
 ## API Endpoints
 
 - `GET /`: Main web interface
+- `GET /healthz`: Container health check (`{"status":"ok"}`)
 - `POST /convert`: Convert uploaded file to Markdown
 - `GET /download/<filename>`: Download converted file
 - `POST /cleanup`: Clean up old temporary files
+
+`POST /convert` returns JSON errors for missing, empty, unsupported, or
+oversized uploads. Conversion failures are logged server-side and return a
+generic JSON error rather than exposing internal exception details.
 
 ## Error Handling
 

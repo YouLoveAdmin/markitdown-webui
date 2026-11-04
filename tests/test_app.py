@@ -99,6 +99,57 @@ class AppApiTests(unittest.TestCase):
             [],
         )
 
+    @patch('app.PdfReader')
+    @patch('app.MarkItDown')
+    def test_convert_appends_prefilled_pdf_form_fields(self, markitdown, pdf_reader):
+        markitdown.return_value.convert.return_value = SimpleNamespace(
+            text_content='Converted PDF content'
+        )
+        pdf_reader.return_value.get_fields.return_value = {
+            'customer.name': {'/V': 'Jane Example'},
+            'empty_field': {'/V': None},
+        }
+
+        response = self.client.post(
+            '/convert',
+            data={'file': (io.BytesIO(b'%PDF-input'), 'form.pdf')},
+            content_type='multipart/form-data',
+        )
+
+        self.assertEqual(response.status_code, 200)
+        result = response.get_json()
+        download_response = self.client.get(result['download_url'])
+        self.assertEqual(
+            download_response.data.decode('utf-8').replace('\r\n', '\n'),
+            'Converted PDF content\n\n'
+            '## PDF Form Fields\n\n'
+            '| Field Name | Field Value |\n'
+            '|---|---|\n'
+            '| customer.name | Jane Example |',
+        )
+        download_response.close()
+        pdf_reader.assert_called_once()
+
+    @patch('app.PdfReader')
+    @patch('app.MarkItDown')
+    def test_convert_pdf_without_prefilled_fields_preserves_markdown(self, markitdown, pdf_reader):
+        markitdown.return_value.convert.return_value = SimpleNamespace(
+            text_content='Converted PDF content'
+        )
+        pdf_reader.return_value.get_fields.return_value = None
+
+        response = self.client.post(
+            '/convert',
+            data={'file': (io.BytesIO(b'%PDF-input'), 'plain.pdf')},
+            content_type='multipart/form-data',
+        )
+
+        self.assertEqual(response.status_code, 200)
+        result = response.get_json()
+        download_response = self.client.get(result['download_url'])
+        self.assertEqual(download_response.data, b'Converted PDF content')
+        download_response.close()
+
     @patch('app.MarkItDown')
     def test_convert_hides_internal_conversion_errors(self, markitdown):
         markitdown.return_value.convert.side_effect = RuntimeError('private detail')

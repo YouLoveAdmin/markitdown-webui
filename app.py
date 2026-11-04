@@ -1,6 +1,7 @@
 from flask import Flask, jsonify, render_template, request, send_from_directory
 import os
 from markitdown import MarkItDown
+from pypdf import PdfReader
 from werkzeug.utils import secure_filename
 import uuid
 from datetime import datetime
@@ -63,6 +64,42 @@ def get_file_type(filename):
     }
     return type_map.get(ext, 'application/octet-stream')
 
+def markdown_table_cell(value):
+    return (
+        str(value)
+        .replace('\\', '\\\\')
+        .replace('|', r'\|')
+        .replace('\r\n', '<br>')
+        .replace('\r', '<br>')
+        .replace('\n', '<br>')
+    )
+
+def append_pdf_form_fields(markdown_content, file_path):
+    with open(file_path, 'rb') as pdf_file:
+        fields = PdfReader(pdf_file).get_fields()
+        if not fields:
+            return markdown_content
+
+        populated_fields = [
+            (name, field.get('/V'))
+            for name, field in fields.items()
+            if field.get('/V') is not None and str(field.get('/V')).strip()
+        ]
+    if not populated_fields:
+        return markdown_content
+
+    rows = [
+        f"| {markdown_table_cell(name)} | {markdown_table_cell(value)} |"
+        for name, value in populated_fields
+    ]
+    return (
+        f"{markdown_content.rstrip()}\n\n"
+        "## PDF Form Fields\n\n"
+        "| Field Name | Field Value |\n"
+        "|---|---|\n"
+        + '\n'.join(rows)
+    )
+
 @app.route('/')
 def index():
     return render_template('index.html')
@@ -94,6 +131,9 @@ def convert_file():
 
         md = MarkItDown(enable_plugins=False)
         result = md.convert(file_path)
+        converted_content = result.text_content
+        if filename.lower().endswith('.pdf'):
+            converted_content = append_pdf_form_fields(converted_content, file_path)
 
         # Generate output filename
         base_name = os.path.splitext(filename)[0]
@@ -102,13 +142,13 @@ def convert_file():
         
         # Save converted content
         with open(output_path, 'w', encoding='utf-8') as f:
-            f.write(result.text_content)
+            f.write(converted_content)
         
         return jsonify({
             'success': True,
             'output_filename': output_filename,
             'download_url': f'/download/{output_filename}',
-            'content_preview': result.text_content[:500] + '...' if len(result.text_content) > 500 else result.text_content,
+            'content_preview': converted_content[:500] + '...' if len(converted_content) > 500 else converted_content,
             'file_type': get_file_type(filename)
         })
         

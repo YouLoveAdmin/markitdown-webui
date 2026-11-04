@@ -10,6 +10,7 @@ A modern web interface for Microsoft's MarkItDown document conversion tool.
 
 - **Drag & Drop Upload**: Intuitive file upload with drag-and-drop support
 - **Document Conversion**: Convert PDF, Word, PowerPoint, Excel files
+- **PDF Form Fields**: Include prefilled PDF form field names and values in converted Markdown
 - **Web Content**: Convert HTML and web pages to Markdown
 - **Data Formats**: Support for CSV, JSON, XML conversion
 - **Live Preview**: See a preview of your converted Markdown before downloading
